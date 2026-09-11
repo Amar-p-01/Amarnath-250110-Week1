@@ -1,4 +1,6 @@
 __pycache__/
 .venv/
 /.idea
-.gitignore
+cifar10_from_scratch/cifar-10
+cifar10_from_scratch/data
+data-science-bowl-2018
