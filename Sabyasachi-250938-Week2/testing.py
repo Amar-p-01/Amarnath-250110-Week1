@@ -16,17 +16,17 @@ BRIGHTNESS_FLOOR = 9
 TARGET_SIZE = (384, 384)
 
 
-def load_and_preprocess(img_path, target_size=TARGET_SIZE, brightness_floor=BRIGHTNESS_FLOOR):
-    """Loads, clips dark noise, and resizes single image to tensor format."""
+def load_and_preprocess_image(img_path, target_size=TARGET_SIZE, brightness_floor=BRIGHTNESS_FLOOR):
+    """Loads, clips dark noise, and resizes image to tensor format."""
     raw_img = Image.open(img_path).convert("L")
-    img_tensor = TF.to_tensor(raw_img)  # [1, H, W] in [0.0, 1.0]
+    img_tensor = TF.to_tensor(raw_img)  # [1, H, W] in range [0.0, 1.0]
 
     # Apply brightness floor
     if brightness_floor > 0:
         normalized_threshold = brightness_floor / 255.0
         img_tensor[img_tensor <= normalized_threshold] = 0.0
 
-    # Resize to model input dimensions
+    # Resize to model input dimensions (Bilinear)
     img_tensor = TF.resize(
         img_tensor,
         size=target_size,
@@ -36,9 +36,31 @@ def load_and_preprocess(img_path, target_size=TARGET_SIZE, brightness_floor=BRIG
     return img_tensor
 
 
+def load_and_merge_masks(mask_folder, target_size=TARGET_SIZE):
+    """Discovers, resizes (nearest-neighbor), sums, and clamps all masks into one binary mask."""
+    mask_paths = glob.glob(os.path.join(mask_folder, "*.png"))
+    if not mask_paths:
+        return None
+
+    merged_mask = torch.zeros((1, *target_size), dtype=torch.float32)
+    for m_path in mask_paths:
+        m_img = Image.open(m_path).convert("L")
+        m_tensor = TF.to_tensor(m_img)
+
+        # Nearest-neighbor to preserve crisp binary edges
+        m_tensor = TF.resize(
+            m_tensor,
+            size=target_size,
+            interpolation=InterpolationMode.NEAREST,
+        )
+        merged_mask += (m_tensor > 0.5).float()
+
+    merged_mask = torch.clamp(merged_mask, min=0.0, max=1.0)
+    return merged_mask.squeeze().numpy()
+
+
 def run_inference(model, img_tensor, device, threshold=0.5):
-    """Runs forward pass and converts logits to a thresholded binary mask."""
-    # Add batch dimension: [1, 1, H, W]
+    """Runs forward pass and converts logits to a thresholded binary numpy array."""
     input_batch = img_tensor.unsqueeze(0).to(device)
 
     with torch.no_grad():
@@ -46,31 +68,57 @@ def run_inference(model, img_tensor, device, threshold=0.5):
         probs = torch.sigmoid(logits)
         pred_mask = (probs > threshold).float()
 
-    # Squeeze batch & channel dimensions -> [H, W] numpy array
     return pred_mask.squeeze().cpu().numpy()
 
 
-def visualize_prediction(image_tensor, pred_mask, sample_uuid):
-    """Displays original image, predicted mask, and a red boundary overlay."""
-    img_np = image_tensor.squeeze().cpu().numpy()
+def visualize(img_tensor, pred_mask, gt_mask, sample_uuid):
+    """Renders visual inspection comparison."""
+    img_np = img_tensor.squeeze().cpu().numpy()
 
-    # Build RGB overlay (red tint on masked regions)
-    overlay = np.stack([img_np, img_np, img_np], axis=-1)
-    overlay[pred_mask > 0.5] = [1.0, 0.2, 0.2]  # Highlight detected cells in light red
+    if gt_mask is not None:
+        # 4-panel comparison: Image, Ground Truth, Prediction, Dual Overlay
+        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        axes[0].imshow(img_np, cmap="gray")
+        axes[0].set_title(f"Input ({TARGET_SIZE[0]}x{TARGET_SIZE[1]})")
+        axes[0].axis("off")
 
-    axes[0].imshow(img_np, cmap="gray")
-    axes[0].set_title(f"Input Image ({TARGET_SIZE[0]}x{TARGET_SIZE[1]})")
-    axes[0].axis("off")
+        axes[1].imshow(gt_mask, cmap="gray")
+        axes[1].set_title("Ground Truth (Merged)")
+        axes[1].axis("off")
 
-    axes[1].imshow(pred_mask, cmap="gray")
-    axes[1].set_title("Predicted Mask (Binary)")
-    axes[1].axis("off")
+        axes[2].imshow(pred_mask, cmap="gray")
+        axes[2].set_title("Predicted Mask")
+        axes[2].axis("off")
 
-    axes[2].imshow(overlay)
-    axes[2].set_title("Mask Overlay on Image")
-    axes[2].axis("off")
+        # Overlay: Green = GT, Red = Pred, Yellow (Red+Green) = True Positive Overlap
+        overlay = np.stack([img_np * 0.7, img_np * 0.7, img_np * 0.7], axis=-1)
+        overlay[gt_mask > 0.5, 1] = 1.0    # Green channel for Ground Truth
+        overlay[pred_mask > 0.5, 0] = 1.0  # Red channel for Predictions
+        # Intersections automatically become [1.0, 1.0, 0.0] -> Yellow
+
+        axes[3].imshow(overlay)
+        axes[3].set_title("Overlay (G: GT, R: Pred, Y: Overlap)")
+        axes[3].axis("off")
+
+    else:
+        # Fallback 3-panel for test directories without a masks folder
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+        axes[0].imshow(img_np, cmap="gray")
+        axes[0].set_title("Input Image")
+        axes[0].axis("off")
+
+        axes[1].imshow(pred_mask, cmap="gray")
+        axes[1].set_title("Predicted Mask")
+        axes[1].axis("off")
+
+        overlay = np.stack([img_np, img_np, img_np], axis=-1)
+        overlay[pred_mask > 0.5] = [1.0, 0.2, 0.2]
+
+        axes[2].imshow(overlay)
+        axes[2].set_title("Prediction Overlay")
+        axes[2].axis("off")
 
     plt.suptitle(f"Sample UUID: {sample_uuid}", fontsize=13)
     plt.tight_layout()
@@ -78,28 +126,28 @@ def visualize_prediction(image_tensor, pred_mask, sample_uuid):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run inference on a random image from dataset")
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to test or train directory")
-    parser.add_argument("--checkpoint", type=str, default="best_unet.pth", help="Path to saved .pth weights")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Probability threshold for mask")
+    parser = argparse.ArgumentParser(description="Inference and Ground Truth comparison")
+    parser.add_argument("--data_dir", type=str, required=True, help="Path to data directory")
+    parser.add_argument("--checkpoint", type=str, default="best_unet.pth", help="Path to saved weights (.pth)")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Classification probability threshold")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Running inference on: {device}")
+    print(f"Device: {device}")
 
-    # 1. Discover sample folders
+    # 1. Select random sample directory
     sample_dirs = [
         os.path.join(args.data_dir, d)
         for d in os.listdir(args.data_dir)
         if os.path.isdir(os.path.join(args.data_dir, d))
     ]
     if not sample_dirs:
-        raise ValueError(f"No sample directories found in {args.data_dir}")
+        raise ValueError(f"No valid sample folders in {args.data_dir}")
 
-    # Pick a random sample
     sample_dir = random.choice(sample_dirs)
     sample_uuid = os.path.basename(sample_dir)
 
+    # 2. Locate image
     img_path = os.path.join(sample_dir, "images", f"{sample_uuid}.png")
     if not os.path.exists(img_path):
         candidates = glob.glob(os.path.join(sample_dir, "images", "*.png"))
@@ -107,24 +155,29 @@ def main():
             raise FileNotFoundError(f"No image found in {sample_dir}/images")
         img_path = candidates[0]
 
-    print(f"Selected Sample: {sample_uuid}")
-    print(f"Image Path: {img_path}")
+    print(f"Sample Selected: {sample_uuid}")
 
-    # 2. Load trained model
+    # 3. Load & preprocess Image and GT Mask (if present)
+    img_tensor = load_and_preprocess_image(img_path)
+
+    mask_folder = os.path.join(sample_dir, "masks")
+    gt_mask = None
+    if os.path.exists(mask_folder):
+        gt_mask = load_and_merge_masks(mask_folder)
+
+    # 4. Load Model and Predict
     model = UNET()
     if not os.path.exists(args.checkpoint):
-        raise FileNotFoundError(f"Checkpoint file not found: {args.checkpoint}")
+        raise FileNotFoundError(f"Checkpoint not found at: {args.checkpoint}")
 
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.to(device)
     model.eval()
 
-    # 3. Preprocess & predict
-    img_tensor = load_and_preprocess(img_path)
     pred_mask = run_inference(model, img_tensor, device, threshold=args.threshold)
 
-    # 4. Display results
-    visualize_prediction(img_tensor, pred_mask, sample_uuid)
+    # 5. Plot
+    visualize(img_tensor, pred_mask, gt_mask, sample_uuid)
 
 
 if __name__ == "__main__":
