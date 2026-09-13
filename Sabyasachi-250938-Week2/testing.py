@@ -66,7 +66,8 @@ def run_inference(model, img_tensor, device, threshold=0.5):
     with torch.no_grad():
         logits = model(input_batch)
         probs = torch.sigmoid(logits)
-        pred_mask = (probs > threshold).float()
+        # pred_mask = (probs > threshold).float()
+        pred_mask = probs.float()
 
     return pred_mask.squeeze().cpu().numpy()
 
@@ -129,7 +130,7 @@ def main():
     parser = argparse.ArgumentParser(description="Inference and Ground Truth comparison")
     parser.add_argument("--data_dir", type=str, required=True, help="Path to data directory")
     parser.add_argument("--checkpoint", type=str, default="best_unet.pth", help="Path to saved weights (.pth)")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Classification probability threshold")
+    parser.add_argument("--threshold", type=float, default=0.95, help="Classification probability threshold")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -175,6 +176,10 @@ def main():
     model.eval()
 
     pred_mask = run_inference(model, img_tensor, device, threshold=args.threshold)
+    print(pred_mask)
+    for i in range(pred_mask.shape[0]):
+        for j in range(pred_mask.shape[1]):
+            print(pred_mask[i, j])
 
     # 5. Plot
     visualize(img_tensor, pred_mask, gt_mask, sample_uuid)

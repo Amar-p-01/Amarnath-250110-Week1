@@ -68,8 +68,8 @@ def main():
     parser.add_argument("--data_dir", type=str, required=True, help="Path to dataset directory")
     parser.add_argument("--checkpoint", type=str, default="best_unet.pth", help="Path to saved model weights")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")
-    parser.add_argument("--start", type=float, default=0.35, help="Sweep starting threshold")
-    parser.add_argument("--end", type=float, default=0.65, help="Sweep ending threshold")
+    parser.add_argument("--start", type=float, default=0.85, help="Sweep starting threshold")
+    parser.add_argument("--end", type=float, default=0.1, help="Sweep ending threshold")
     parser.add_argument("--step", type=float, default=0.025, help="Step size for threshold sweep")
     args = parser.parse_args()
 
