@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 # Custom project imports
-from architecture import UNET
+from architecture import UNET, UNETUpsampleBilinear
 from utils import JaccardLoss
 from utils import SegmentationDataset, train_segmentation
 
@@ -58,7 +58,7 @@ def main():
     ) if val_size > 0 else None
 
     # 3. Model instantiation (1 input channel -> grayscale; 1 output channel -> binary mask logits)
-    model = UNET()
+    model = UNETUpsampleBilinear()
 
     # 4. Optimization & Loss
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
